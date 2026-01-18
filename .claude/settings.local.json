@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl:*)",
+      "Bash(node -e:*)",
+      "Bash(node -p:*)",
+      "Bash(for slug in btc-updown-15m-1765548000 btc-updown-15m-1765548900 btc-updown-15m-1765549800)",
+      "Bash(do echo \"Testing $slug:\")",
+      "Bash(done)",
+      "Bash(for slug in btc-updown-15m-1765546200 btc-updown-15m-1765547100 btc-updown-15m-1765548000)",
+      "Bash(do echo \"=== Testing $slug ===\")",
+      "Bash(cat:*)",
+      "Bash(mkdir:*)",
+      "Bash(mv:*)",
+      "Bash(cargo build:*)"
+    ]
+  }
+}

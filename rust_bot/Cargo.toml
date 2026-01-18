@@ -1,0 +1,58 @@
+[package]
+name = "polymarket-vulture-bot"
+version = "1.0.0"
+edition = "2021"
+authors = ["Your Name"]
+description = "High-performance mean reversion trading bot for Polymarket Gamma markets"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json"] }
+
+# WebSocket client
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+
+# JSON serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Environment variables
+dotenv = "0.15"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Ethereum integration
+ethers = { version = "2.0", features = ["ws", "rustls"] }
+
+# Polymarket CLOB client (polyfill-rs)
+polyfill-rs = { git = "https://github.com/floor-licker/polyfill-rs" }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Numeric types
+rust_decimal = { version = "1.33", features = ["serde-float"] }
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Web scraping (for Polymarket price extraction)
+headless_chrome = "1.0"
+regex = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

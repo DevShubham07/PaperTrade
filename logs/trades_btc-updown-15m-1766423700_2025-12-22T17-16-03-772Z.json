@@ -1,0 +1,164 @@
+{
+  "session": {
+    "startTime": "2025-12-22T17:16:03.772Z",
+    "endTime": "2025-12-22T17:21:10.607Z",
+    "duration": 307,
+    "marketSlug": "btc-updown-15m-1766423700"
+  },
+  "wallet": {
+    "startingCapital": 20,
+    "endingCapital": 19.54,
+    "netChange": -0.46,
+    "netChangePercent": -2.29,
+    "profitable": false
+  },
+  "statistics": {
+    "totalBuyOrders": 2,
+    "executedBuyOrders": 2,
+    "exits": {
+      "limitSells": 0,
+      "stopLosses": 2,
+      "cancelled": 2,
+      "total": 2
+    },
+    "nakedPositions": 0,
+    "totalTrades": 6
+  },
+  "financial": {
+    "totalInvested": 3.98,
+    "totalProceeds": 3.52,
+    "realizedPNL": -0.46,
+    "unrealizedPNL": 0,
+    "netPNL": -0.46,
+    "roi": -11.51
+  },
+  "trades": [
+    {
+      "id": "trade_0",
+      "timestamp": "2025-12-22T17:16:09.720Z",
+      "marketSlug": "btc-updown-15m-1766423700",
+      "side": "BUY",
+      "tokenId": "6645559706211360585976507388869353961631335922455394393515091515169745487268",
+      "tokenType": "DOWN",
+      "price": 0.7,
+      "size": 2.8571,
+      "amount": 1.9999699999999998,
+      "orderId": "PAPER_FOK_0",
+      "status": "FILLED",
+      "exitType": null
+    },
+    {
+      "id": "trade_1",
+      "timestamp": "2025-12-22T17:16:09.720Z",
+      "marketSlug": "btc-updown-15m-1766423700",
+      "side": "SELL",
+      "tokenId": "6645559706211360585976507388869353961631335922455394393515091515169745487268",
+      "tokenType": "DOWN",
+      "price": 0.76,
+      "size": 2.8571,
+      "amount": 2.171396,
+      "orderId": "PAPER_1",
+      "status": "CANCELLED",
+      "pairedWith": "trade_0",
+      "exitType": "LIMIT"
+    },
+    {
+      "id": "trade_2",
+      "timestamp": "2025-12-22T17:16:24.202Z",
+      "marketSlug": "btc-updown-15m-1766423700",
+      "side": "SELL",
+      "tokenId": "6645559706211360585976507388869353961631335922455394393515091515169745487268",
+      "tokenType": "DOWN",
+      "price": 0.62,
+      "size": 2.8571,
+      "amount": 1.771402,
+      "orderId": "STOP_LOSS_1766423784202",
+      "status": "FILLED",
+      "pairedWith": "trade_0",
+      "exitType": "STOP_LOSS"
+    },
+    {
+      "id": "trade_3",
+      "timestamp": "2025-12-22T17:19:59.280Z",
+      "marketSlug": "btc-updown-15m-1766423700",
+      "side": "BUY",
+      "tokenId": "109104194038080446353435690927446398856432940765116181652167704079619402542300",
+      "tokenType": "UP",
+      "price": 0.69,
+      "size": 2.8654,
+      "amount": 1.977126,
+      "orderId": "PAPER_FOK_2",
+      "status": "FILLED",
+      "exitType": null
+    },
+    {
+      "id": "trade_4",
+      "timestamp": "2025-12-22T17:19:59.281Z",
+      "marketSlug": "btc-updown-15m-1766423700",
+      "side": "SELL",
+      "tokenId": "109104194038080446353435690927446398856432940765116181652167704079619402542300",
+      "tokenType": "UP",
+      "price": 0.73,
+      "size": 2.8654,
+      "amount": 2.091742,
+      "orderId": "PAPER_3",
+      "status": "CANCELLED",
+      "pairedWith": "trade_3",
+      "exitType": "LIMIT"
+    },
+    {
+      "id": "trade_5",
+      "timestamp": "2025-12-22T17:20:02.205Z",
+      "marketSlug": "btc-updown-15m-1766423700",
+      "side": "SELL",
+      "tokenId": "109104194038080446353435690927446398856432940765116181652167704079619402542300",
+      "tokenType": "UP",
+      "price": 0.61,
+      "size": 2.8654,
+      "amount": 1.747894,
+      "orderId": "STOP_LOSS_1766424002205",
+      "status": "FILLED",
+      "pairedWith": "trade_3",
+      "exitType": "STOP_LOSS"
+    }
+  ],
+  "completedTrades": [
+    {
+      "buyOrder": {
+        "id": "trade_0",
+        "price": 0.7,
+        "size": 2.8571,
+        "amount": 1.9999699999999998,
+        "timestamp": "2025-12-22T17:16:09.720Z"
+      },
+      "sellOrder": {
+        "id": "trade_2",
+        "price": 0.62,
+        "size": 2.8571,
+        "amount": 1.771402,
+        "timestamp": "2025-12-22T17:16:24.202Z"
+      },
+      "pnl": -0.23,
+      "roi": -11.43
+    },
+    {
+      "buyOrder": {
+        "id": "trade_3",
+        "price": 0.69,
+        "size": 2.8654,
+        "amount": 1.977126,
+        "timestamp": "2025-12-22T17:19:59.280Z"
+      },
+      "sellOrder": {
+        "id": "trade_5",
+        "price": 0.61,
+        "size": 2.8654,
+        "amount": 1.747894,
+        "timestamp": "2025-12-22T17:20:02.205Z"
+      },
+      "pnl": -0.23,
+      "roi": -11.59
+    }
+  ],
+  "nakedPositions": []
+}
