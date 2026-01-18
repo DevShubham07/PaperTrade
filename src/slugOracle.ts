@@ -4,6 +4,7 @@
  */
 
 import axios from 'axios';
+import { CONFIG } from './config';
 
 // CONSTANTS
 const GAMMA_API = 'https://gamma-api.polymarket.com';
@@ -124,41 +125,47 @@ export class SlugOracle {
             // Extract Starting Price for Up/Down markets (Price to Beat)
             // These markets resolve based on: end_price >= start_price = UP, otherwise DOWN
             // The "strike" is effectively the starting price of the 15-minute window
-            // ALWAYS fetch from API first - it's the authoritative source
+            // NOTE: In hedge arbitrage mode, we do NOT block market discovery on strike-price API.
             let startingPrice = 0;
 
-            // Fetch from Polymarket crypto-price API (authoritative source)
-            // Extract dates - handle both string and Date formats
-            let eventStart: string | Date | undefined = marketData.eventStartTime || marketData.startDate;
-            let eventEnd: string | Date | undefined = marketData.endDate;
-            
-            // Convert strings to Date objects if needed
-            if (eventStart && typeof eventStart === 'string') {
-                eventStart = new Date(eventStart);
-            }
-            if (eventEnd && typeof eventEnd === 'string') {
-                eventEnd = new Date(eventEnd);
-            }
-            
-            // Check cache first for instant response
-            if (this.strikePriceCache.has(activeSlug)) {
-                startingPrice = this.strikePriceCache.get(activeSlug) as number;
-                console.log(`💰 Strike price from cache: $${startingPrice.toFixed(2)}`);
-            } else if (eventStart && eventEnd) {
-                // Fetch price synchronously (await it)
-                try {
-                    console.log(`🔍 Fetching strike price for ${activeSlug}...`);
-                    const fetchedPrice = await this.getPriceToBeatWithRetry(activeSlug, eventStart, eventEnd);
-                    if (fetchedPrice > 0) {
-                        startingPrice = fetchedPrice;
-                        this.strikePriceCache.set(activeSlug, fetchedPrice);
-                        console.log(`✅ Strike price fetched: $${startingPrice.toFixed(2)}`);
-                    } else {
-                        console.warn(`⚠️ Strike price fetch returned 0 for ${activeSlug}`);
+            if (CONFIG.HEDGE_ARBITRAGE_MODE) {
+                // Hedge arbitrage only needs the strike at settlement time.
+                // We avoid blocking market discovery here to prevent rate-limit stalls.
+                startingPrice = 0;
+            } else {
+                // Fetch from Polymarket crypto-price API (authoritative source)
+                // Extract dates - handle both string and Date formats
+                let eventStart: string | Date | undefined = marketData.eventStartTime || marketData.startDate;
+                let eventEnd: string | Date | undefined = marketData.endDate;
+                
+                // Convert strings to Date objects if needed
+                if (eventStart && typeof eventStart === 'string') {
+                    eventStart = new Date(eventStart);
+                }
+                if (eventEnd && typeof eventEnd === 'string') {
+                    eventEnd = new Date(eventEnd);
+                }
+                
+                // Check cache first for instant response
+                if (this.strikePriceCache.has(activeSlug)) {
+                    startingPrice = this.strikePriceCache.get(activeSlug) as number;
+                    console.log(`💰 Strike price from cache: $${startingPrice.toFixed(2)}`);
+                } else if (eventStart && eventEnd) {
+                    // Fetch price synchronously (await it)
+                    try {
+                        console.log(`🔍 Fetching strike price for ${activeSlug}...`);
+                        const fetchedPrice = await this.getPriceToBeatWithRetry(activeSlug, eventStart, eventEnd);
+                        if (fetchedPrice > 0) {
+                            startingPrice = fetchedPrice;
+                            this.strikePriceCache.set(activeSlug, fetchedPrice);
+                            console.log(`✅ Strike price fetched: $${startingPrice.toFixed(2)}`);
+                        } else {
+                            console.warn(`⚠️ Strike price fetch returned 0 for ${activeSlug}`);
+                        }
+                    } catch (error: any) {
+                        console.error(`❌ Failed to fetch strike price: ${error.message}`);
+                        // Will try fallback
                     }
-                } catch (error: any) {
-                    console.error(`❌ Failed to fetch strike price: ${error.message}`);
-                    // Will try fallback
                 }
             }
 
@@ -272,10 +279,13 @@ export class SlugOracle {
                 params: params
             });
 
-            // If it's a rate limit error, add extra logging
+            // If it's a rate limit error, add extra logging and longer backoff
             if (error.response?.status === 429 || error.response?.data?.error?.includes('429')) {
-                console.warn('🚦 Chainlink API rate limited - this is normal during high traffic periods');
+                console.warn('🚦 Chainlink API rate limited (429) - this is normal during high traffic periods');
+                console.warn('💡 Using longer backoff delays to respect rate limits');
                 console.warn('💡 Consider using cached strike prices or manual strike price override');
+                // Throw a special error to trigger longer backoff in retry logic
+                throw new Error('RATE_LIMIT_429');
             }
 
             return 0;
@@ -295,18 +305,36 @@ export class SlugOracle {
     ): Promise<number> {
         let attempt = 1;
         
+        let isRateLimited = false;
+        
         while (true) {
-            const price = await this.getPriceToBeat(slug, eventStartTime, endDate);
-            if (price > 0) {
-                if (attempt > 1) {
-                    console.log(`✅ Strike price fetched successfully after ${attempt} attempts!`);
+            try {
+                const price = await this.getPriceToBeat(slug, eventStartTime, endDate);
+                if (price > 0) {
+                    if (attempt > 1) {
+                        console.log(`✅ Strike price fetched successfully after ${attempt} attempts!`);
+                    }
+                    return price;
                 }
-                return price;
+            } catch (error: any) {
+                // Check if it's a rate limit error
+                if (error.message === 'RATE_LIMIT_429') {
+                    isRateLimited = true;
+                }
             }
 
-            // Exponential backoff with max cap of 30 seconds
-            const delay = Math.min(baseDelayMs * Math.pow(1.5, attempt - 1), 30000);
+            // Exponential backoff with longer delays for rate limits
+            // For 429 errors, use longer base delay (10 seconds) and cap at 60 seconds
+            const rateLimitBaseDelay = 10000; // 10 seconds for rate limits
+            const normalBaseDelay = baseDelayMs;
+            const baseDelay = isRateLimited ? rateLimitBaseDelay : normalBaseDelay;
+            const maxDelay = isRateLimited ? 60000 : 30000; // 60s for rate limits, 30s otherwise
+            const delay = Math.min(baseDelay * Math.pow(1.5, attempt - 1), maxDelay);
+            
             console.log(`⏳ Strike price fetch failed. Retrying in ${(delay/1000).toFixed(1)}s (attempt ${attempt})...`);
+            if (isRateLimited) {
+                console.log('🚦 Rate limit detected - using longer backoff delays');
+            }
             await new Promise(resolve => setTimeout(resolve, delay));
             
             attempt++;

@@ -1,0 +1,38 @@
+{
+  "session": {
+    "startTime": "2026-01-18T07:59:59.638Z",
+    "endTime": "2026-01-18T08:00:01.897Z",
+    "duration": 2,
+    "marketSlug": "unknown"
+  },
+  "wallet": {
+    "startingCapital": 10,
+    "endingCapital": 10,
+    "netChange": 0,
+    "netChangePercent": 0,
+    "profitable": true
+  },
+  "statistics": {
+    "totalBuyOrders": 0,
+    "executedBuyOrders": 0,
+    "exits": {
+      "limitSells": 0,
+      "stopLosses": 0,
+      "cancelled": 0,
+      "total": 0
+    },
+    "nakedPositions": 0,
+    "totalTrades": 0
+  },
+  "financial": {
+    "totalInvested": 0,
+    "totalProceeds": 0,
+    "realizedPNL": 0,
+    "unrealizedPNL": 0,
+    "netPNL": 0,
+    "roi": 0
+  },
+  "trades": [],
+  "completedTrades": [],
+  "nakedPositions": []
+}

@@ -1,371 +1,476 @@
 /**
- * Hedge Arbitrage Strategy (Paper Trading)
- *
- * Goal: At the start of each market session, buy BOTH UP and DOWN at a fixed price (default $0.49),
- * then hold to settlement. Because exactly one side settles at $1.00 and the other at $0.00,
- * buying both at $0.49/$0.49 yields a deterministic +$0.02 per share pair (ignoring fees).
- *
- * Notes:
- * - This strategy is intended for PAPER mode only (enforced in config validation).
- * - We simulate settlement by "selling" both positions at payout prices (1.00 / 0.00) once
- *   timeRemainingSeconds <= 0.
+ * Hedge Arbitrage Strategy
+ * 
+ * Strategy: Buy both UP and DOWN tokens at a fixed price (e.g., $0.49) at market start.
+ * At expiry, one token settles at $1.00 and the other at $0.00, guaranteeing a profit.
+ * 
+ * Example: Buy UP at $0.49 and DOWN at $0.49 (total $0.98).
+ * At expiry: One token = $1.00, other = $0.00
+ * Profit: $1.00 - $0.98 = $0.02 per share pair
+ * 
+ * Uses 20% of total bankroll per 15-minute market session.
  */
 
 import { ExecutionGateway, TradeRecord } from '../execution';
 import { OrderBookService } from '../services/orderBookService';
 import { MarketConfig } from '../slugOracle';
 import { CONFIG } from '../config';
-import type { StrategyStats, SessionState, CircuitBreakerState } from './ExpirationConvergenceStrategy';
+
+export interface SessionState {
+    sessionPnL: number;
+    sessionStartTime: number;
+    isSessionLocked: boolean;
+    lockReason: 'PROFIT_TARGET' | 'LOSS_LIMIT' | null;
+    tradesThisSession: number;
+}
+
+export interface CircuitBreakerState {
+    isCoolingDown: boolean;
+    crashLowPrice: number;
+    stabilityCounter: number;
+    lastStopLossTime: number;
+    crashTokenId: string;
+    lastTradeTime: number;
+}
+
+export interface StrategyStats {
+    totalBuyOrders: number;
+    totalSellOrders: number;
+    executedBuyOrders: number;
+    executedSellOrders: number;
+    stopLossExits: number;
+    limitSellFills: number;
+    cancelledSells: number;
+    nakedPositions: number;
+    totalTrades: number;
+    totalInvested: number;
+    totalProceeds: number;
+    netPNL: number;
+    realizedPNL: number;
+    unrealizedPNL: number;
+}
 
 export class HedgeArbitrage49Strategy {
     private executionGateway: ExecutionGateway;
     private orderBookService: OrderBookService;
-
     private tradeRecords: Map<string, TradeRecord> = new Map();
-    private orderCounter = 0;
-
-    private currentMarketSlug: string | null = null;
-    private hasOpenedThisMarket = false;
-    private hasSettledThisMarket = false;
-
+    private activePositions: Map<string, TradeRecord> = new Map();
+    private orderCounter: number = 0;
+    
+    // Per-market state
+    private hasEnteredThisMarket: boolean = false;
     private upTokenId: string | null = null;
     private downTokenId: string | null = null;
-    private sharesPerSide: number | null = null;
-
-    private lastSpotPrice: number | null = null;
-    private lastStrikePrice: number | null = null;
-
+    private currentMarketSlug: string | null = null;
+    private upPosition: TradeRecord | null = null;
+    private downPosition: TradeRecord | null = null;
+    private storedStrikePrice: number = 0;
+    private lastUpOrderId: string | null = null;
+    private lastDownOrderId: string | null = null;
+    private lastFillStatusLogMs: number = 0;
+    
+    // Session state
     private sessionState: SessionState = {
         sessionPnL: 0,
         sessionStartTime: Date.now(),
         isSessionLocked: false,
         lockReason: null,
-        tradesThisSession: 0,
+        tradesThisSession: 0
+    };
+    
+    // Circuit breaker (minimal for this strategy)
+    private circuitBreakerState: CircuitBreakerState = {
+        isCoolingDown: false,
+        crashLowPrice: 0,
+        stabilityCounter: 0,
+        lastStopLossTime: 0,
+        crashTokenId: '',
+        lastTradeTime: 0
+    };
+    
+    // Stats
+    private stats: StrategyStats = {
+        totalBuyOrders: 0,
+        totalSellOrders: 0,
+        executedBuyOrders: 0,
+        executedSellOrders: 0,
+        stopLossExits: 0,
+        limitSellFills: 0,
+        cancelledSells: 0,
+        nakedPositions: 0,
+        totalTrades: 0,
+        totalInvested: 0,
+        totalProceeds: 0,
+        netPNL: 0,
+        realizedPNL: 0,
+        unrealizedPNL: 0
     };
 
     constructor(executionGateway: ExecutionGateway, orderBookService: OrderBookService) {
         this.executionGateway = executionGateway;
         this.orderBookService = orderBookService;
-
+        
         console.log('');
-        console.log('🧷 ════════════════════════════════════════');
-        console.log('🧷   HEDGE ARB STRATEGY (PAPER)');
-        console.log(`🧷   Buy BOTH @ $${CONFIG.HEDGE_ENTRY_PRICE.toFixed(2)} and hold to settlement`);
-        console.log('🧷 ════════════════════════════════════════');
+        console.log('🔄 ════════════════════════════════════════════');
+        console.log('🔄   HEDGE ARBITRAGE STRATEGY');
+        console.log('🔄 ════════════════════════════════════════════');
+        console.log(`🔄   Entry Price: $${CONFIG.HEDGE_ENTRY_PRICE.toFixed(2)}`);
+        console.log(`🔄   Capital per Market: 20% of bankroll`);
+        console.log(`🔄   Strategy: Buy both UP and DOWN, hold to expiry`);
+        console.log('🔄 ════════════════════════════════════════════');
         console.log('');
-    }
-
-    // Compatibility with main.ts monitoring output
-    getSessionState(): SessionState {
-        return { ...this.sessionState };
-    }
-
-    // Compatibility: no circuit breaker used here
-    getCircuitBreakerState(): CircuitBreakerState {
-        return {
-            isCoolingDown: false,
-            crashLowPrice: 0,
-            stabilityCounter: 0,
-            lastStopLossTime: 0,
-            crashTokenId: '',
-            lastTradeTime: 0,
-        };
-    }
-
-    // Compatibility: never use kill zone in hedge mode
-    isInKillZone(_upAsk?: number, _upBid?: number, _downAsk?: number, _downBid?: number): boolean {
-        return false;
     }
 
     /**
-     * Entry decision: open once per market, then do nothing until settlement.
+     * Check if we should enter a trade (once per market session)
      */
     shouldEnterTrade(
         spotPrice: number,
         strikePrice: number,
         timeRemainingSeconds: number,
-        _currentPrices?: { upAsk: number; upBid: number; downAsk: number; downBid: number }
+        currentPrices?: { upAsk: number; upBid: number; downAsk: number; downBid: number }
     ): { shouldTrade: boolean; direction: 'UP' | 'DOWN' | null; fairValue?: number; volatility?: number } {
-        this.lastSpotPrice = spotPrice;
-        this.lastStrikePrice = strikePrice;
-
-        if (this.sessionState.isSessionLocked) {
+        // Only enter once per market (market info is handled in executeTrade)
+        if (this.hasEnteredThisMarket) {
             return { shouldTrade: false, direction: null };
         }
 
-        // Only open once per market
-        if (this.hasOpenedThisMarket) {
+        // Check if we have enough cash (need 20% of bankroll)
+        const capitalPerMarket = CONFIG.BANKROLL * 0.20; // 20% of total bankroll
+        const paperCash = this.executionGateway.getPaperCash();
+        
+        if (paperCash < capitalPerMarket) {
+            console.log(`⚠️ Insufficient cash for hedge arbitrage. Need: $${capitalPerMarket.toFixed(2)}, Have: $${paperCash.toFixed(2)}`);
             return { shouldTrade: false, direction: null };
         }
 
-        // Don't open if already expired
-        if (timeRemainingSeconds <= 0) {
-            return { shouldTrade: false, direction: null };
-        }
+        // IMPORTANT: You cannot expect BOTH asks to be in a narrow band simultaneously,
+        // because UP and DOWN are complements (their prices tend to sum ~1).
+        //
+        // Instead, we place resting BUY LIMIT (bid) orders at our desired prices at market start.
+        // They will fill if/when the market's ask comes down to our bid.
+        //
+        // We validate our *intended bid prices* are within range and sum < 1.
+        const bidUp = CONFIG.HEDGE_ENTRY_PRICE;
+        const bidDown = CONFIG.HEDGE_ENTRY_PRICE;
+        const sum = bidUp + bidDown;
 
+        const inRange =
+            bidUp >= CONFIG.HEDGE_ENTRY_MIN_PRICE &&
+            bidUp <= CONFIG.HEDGE_ENTRY_MAX_PRICE &&
+            bidDown >= CONFIG.HEDGE_ENTRY_MIN_PRICE &&
+            bidDown <= CONFIG.HEDGE_ENTRY_MAX_PRICE;
+
+        const sumOk = sum <= CONFIG.HEDGE_MAX_COMBINED_PRICE;
+
+        if (!inRange || !sumOk) return { shouldTrade: false, direction: null };
+
+        // Direction is just a "go" signal for main.ts; we buy both legs in executeTrade().
         return { shouldTrade: true, direction: 'UP' };
     }
 
     /**
-     * Open the hedge: buy BOTH tokens at fixed price.
-     * (direction argument ignored; kept for compatibility)
+     * Execute the hedge arbitrage trade
      */
     async executeTrade(
         marketInfo: MarketConfig,
-        _spotPrice: number,
-        _strikePrice: number,
-        _direction: 'UP' | 'DOWN',
-        _fairValue: number = 0.0
-    ): Promise<{ buyOrderId: string; sellOrderId: string } | null> {
-        if (this.hasOpenedThisMarket) {
+        spotPrice: number,
+        strikePrice: number,
+        direction: 'UP' | 'DOWN',
+        fairValue: number = 0.0
+    ): Promise<{ buyOrderId: string; sellOrderId?: string } | null> {
+        // Reset if we're in a new market
+        if (this.currentMarketSlug !== marketInfo.eventSlug) {
+            this.hasEnteredThisMarket = false;
+            this.currentMarketSlug = marketInfo.eventSlug;
+            this.upTokenId = marketInfo.upTokenId;
+            this.downTokenId = marketInfo.downTokenId;
+            this.upPosition = null;
+            this.downPosition = null;
+            this.lastUpOrderId = null;
+            this.lastDownOrderId = null;
+            // In this simplified hedge mode, we don't need strike/spot for settlement.
+            this.storedStrikePrice = 0;
+        }
+
+        if (this.hasEnteredThisMarket) {
             return null;
         }
 
-        this.currentMarketSlug = marketInfo.eventSlug;
-        this.sessionState.sessionStartTime = Date.now();
-
-        const entryPrice = CONFIG.HEDGE_ENTRY_PRICE;
-        this.upTokenId = marketInfo.upTokenId;
-        this.downTokenId = marketInfo.downTokenId;
-
-        // Allocate capital: use up to MAX_CAPITAL_PER_TRADE, or whatever cash we have
-        const cash = this.executionGateway.getPaperCash();
-        const totalBudget = Math.min(CONFIG.MAX_CAPITAL_PER_TRADE, cash);
-
-        // Need at least MIN_ORDER_SIZE per side (so >= 2 * MIN_ORDER_SIZE total)
-        if (totalBudget < 2 * CONFIG.MIN_ORDER_SIZE) {
-            console.log(
-                `⚠️ Hedge skip: need at least $${(2 * CONFIG.MIN_ORDER_SIZE).toFixed(2)} cash for two buys, have $${cash.toFixed(2)}`
-            );
-            return null;
-        }
-
-        // Shares per side so total spend ≈ totalBudget at entryPrice/entryPrice
-        // totalCost = shares * entryPrice * 2
-        const rawShares = totalBudget / (2 * entryPrice);
-        const shares = Math.floor(rawShares * 10000) / 10000; // 4dp
-        const perSideAmount = shares * entryPrice;
-
-        if (shares <= 0 || perSideAmount < CONFIG.MIN_ORDER_SIZE) {
-            console.log(`⚠️ Hedge skip: computed shares too small (${shares}) / amount per side $${perSideAmount.toFixed(2)}`);
-            return null;
-        }
-
-        this.sharesPerSide = shares;
+        const capitalPerMarket = CONFIG.BANKROLL * 0.20; // 20% of total bankroll
+        const capitalPerToken = capitalPerMarket / 2; // Split equally: $1 UP + $1 DOWN for $10 bankroll
 
         console.log('');
-        console.log('🧷 ════════════════════════════════════════');
-        console.log('🧷   OPENING HEDGE');
-        console.log('🧷 ════════════════════════════════════════');
-        console.log(`   Market: ${marketInfo.eventSlug}`);
-        console.log(`   Entry Price: $${entryPrice.toFixed(2)} (both sides)`);
-        console.log(`   Shares: ${shares.toFixed(4)} each side`);
-        console.log(`   Spend: $${(perSideAmount * 2).toFixed(2)} total`);
+        console.log('🔄 ════════════════════════════════════════════');
+        console.log('🔄   EXECUTING HEDGE ARBITRAGE');
+        console.log('🔄 ════════════════════════════════════════════');
+        console.log(`💰 Capital per market: $${capitalPerMarket.toFixed(2)}`);
+        console.log(`💰 Capital per token: $${capitalPerToken.toFixed(2)}`);
+        console.log(`💰 Entry price: $${CONFIG.HEDGE_ENTRY_PRICE.toFixed(2)}`);
+        console.log('🔄 ════════════════════════════════════════════');
+        console.log('');
 
-        // Buy UP
-        const upBuyId = await this.executionGateway.placeFOKOrder(
-            marketInfo.upTokenId,
-            'BUY',
-            perSideAmount,
-            entryPrice
-        );
+        try {
+            // Place resting bids at our desired prices (same bid for both legs by default).
+            // These orders may remain pending; main.ts will poll order books and call checkPaperFills().
+            const bidUp = CONFIG.HEDGE_ENTRY_PRICE;
+            const bidDown = CONFIG.HEDGE_ENTRY_PRICE;
+            const sharesUp = capitalPerToken / bidUp;
+            const sharesDown = capitalPerToken / bidDown;
 
-        const upBuyRecord: TradeRecord = {
-            id: `trade_${this.orderCounter++}`,
-            timestamp: Date.now(),
-            marketSlug: marketInfo.eventSlug,
-            side: 'BUY',
-            tokenId: marketInfo.upTokenId,
-            tokenType: 'UP',
-            price: entryPrice,
-            size: shares,
-            orderId: upBuyId,
-            status: 'FILLED',
-        };
-        this.tradeRecords.set(upBuyRecord.id, upBuyRecord);
+            console.log(`🧾 Placing hedge bids: UP bid=$${bidUp.toFixed(4)} DOWN bid=$${bidDown.toFixed(4)} | BidSum=$${(bidUp + bidDown).toFixed(4)}`);
+            console.log(`🧾 Range=[${CONFIG.HEDGE_ENTRY_MIN_PRICE.toFixed(3)}-${CONFIG.HEDGE_ENTRY_MAX_PRICE.toFixed(3)}] SumMax=${CONFIG.HEDGE_MAX_COMBINED_PRICE.toFixed(3)}`);
 
-        // Buy DOWN
-        const downBuyId = await this.executionGateway.placeFOKOrder(
-            marketInfo.downTokenId,
-            'BUY',
-            perSideAmount,
-            entryPrice
-        );
+            console.log(`🔄 Placing UP BUY LIMIT: ${sharesUp.toFixed(4)} shares @ $${bidUp.toFixed(4)}`);
+            const upOrderId = await this.executionGateway.placeLimitOrder(
+                marketInfo.upTokenId,
+                'BUY',
+                bidUp,
+                sharesUp,
+                'GTC'
+            );
+            console.log(`✅ UP limit order placed: ${upOrderId}`);
 
-        const downBuyRecord: TradeRecord = {
-            id: `trade_${this.orderCounter++}`,
-            timestamp: Date.now(),
-            marketSlug: marketInfo.eventSlug,
-            side: 'BUY',
-            tokenId: marketInfo.downTokenId,
-            tokenType: 'DOWN',
-            price: entryPrice,
-            size: shares,
-            orderId: downBuyId,
-            status: 'FILLED',
-        };
-        this.tradeRecords.set(downBuyRecord.id, downBuyRecord);
+            console.log(`🔄 Placing DOWN BUY LIMIT: ${sharesDown.toFixed(4)} shares @ $${bidDown.toFixed(4)}`);
+            const downOrderId = await this.executionGateway.placeLimitOrder(
+                marketInfo.downTokenId,
+                'BUY',
+                bidDown,
+                sharesDown,
+                'GTC'
+            );
+            console.log(`✅ DOWN limit order placed: ${downOrderId}`);
 
-        this.hasOpenedThisMarket = true;
+            this.lastUpOrderId = upOrderId;
+            this.lastDownOrderId = downOrderId;
 
-        console.log(`   ✅ Bought UP @ $${entryPrice.toFixed(2)} (order ${upBuyId})`);
-        console.log(`   ✅ Bought DOWN @ $${entryPrice.toFixed(2)} (order ${downBuyId})`);
-        console.log(`   💰 Paper cash remaining: $${this.executionGateway.getPaperCash().toFixed(2)}`);
-        console.log('🧷 ════════════════════════════════════════');
+            // LIMIT orders may be pending until market asks cross our bids.
+            const upFilled = await this.executionGateway.isOrderFilled(upOrderId);
+            const downFilled = await this.executionGateway.isOrderFilled(downOrderId);
 
-        // No sell orders in hedge mode; settlement happens at expiry.
-        return { buyOrderId: upBuyId, sellOrderId: '' };
+            // Record positions
+            const upTrade: TradeRecord = {
+                id: `hedge_up_${Date.now()}`,
+                timestamp: Date.now(),
+                marketSlug: marketInfo.eventSlug,
+                side: 'BUY',
+                tokenId: marketInfo.upTokenId,
+                tokenType: 'UP',
+                price: bidUp,
+                size: sharesUp,
+                orderId: upOrderId,
+                status: upFilled ? 'FILLED' : 'PENDING'
+            };
+
+            const downTrade: TradeRecord = {
+                id: `hedge_down_${Date.now()}`,
+                timestamp: Date.now(),
+                marketSlug: marketInfo.eventSlug,
+                side: 'BUY',
+                tokenId: marketInfo.downTokenId,
+                tokenType: 'DOWN',
+                price: bidDown,
+                size: sharesDown,
+                orderId: downOrderId,
+                status: downFilled ? 'FILLED' : 'PENDING'
+            };
+
+            this.tradeRecords.set(upOrderId, upTrade);
+            this.tradeRecords.set(downOrderId, downTrade);
+            this.activePositions.set(upOrderId, upTrade);
+            this.activePositions.set(downOrderId, downTrade);
+            this.upPosition = upTrade;
+            this.downPosition = downTrade;
+
+            this.hasEnteredThisMarket = true;
+            this.stats.totalBuyOrders += 2;
+            this.sessionState.tradesThisSession += 2;
+            this.stats.executedBuyOrders += (upFilled ? 1 : 0) + (downFilled ? 1 : 0);
+
+            console.log('✅ Hedge arbitrage entry attempted');
+            console.log(`   UP:   ${sharesUp.toFixed(4)} shares @ $${bidUp.toFixed(4)} | ${upFilled ? 'FILLED' : 'PENDING'} (${upOrderId})`);
+            console.log(`   DOWN: ${sharesDown.toFixed(4)} shares @ $${bidDown.toFixed(4)} | ${downFilled ? 'FILLED' : 'PENDING'} (${downOrderId})`);
+            console.log(`   Total invested: $${capitalPerMarket.toFixed(2)}`);
+            console.log(`   Remaining cash: $${this.executionGateway.getPaperCash().toFixed(2)}`);
+            console.log('');
+
+            // Return the order IDs (main.ts expects this format)
+            return {
+                buyOrderId: upOrderId,
+                sellOrderId: downOrderId // We don't have a sell order yet, but return downOrderId as placeholder
+            };
+
+        } catch (error: any) {
+            console.error('❌ Error executing hedge arbitrage:', error.message);
+            return null;
+        }
     }
 
     /**
-     * Called every tick. In hedge mode we use it to detect expiry and settle the positions.
+     * Update order status and handle settlement at market expiry
      */
-    async updateOrderStatus(timeRemainingSeconds?: number): Promise<void> {
-        if (!this.hasOpenedThisMarket || this.hasSettledThisMarket) {
-            return;
+    async updateOrderStatus(timeRemainingSeconds: number, spotPrice: number = 0): Promise<void> {
+        // Check if market is expiring (within 10 seconds)
+        if (timeRemainingSeconds <= 10 && this.upPosition && this.downPosition) {
+            // Market is expiring - settle positions
+            await this.settlePositions();
+        } else {
+            // Lightweight fill-status logging (throttled) to show if anything is still pending
+            if (this.lastUpOrderId && this.lastDownOrderId && Date.now() - this.lastFillStatusLogMs > 10_000) {
+                const upFilled = await this.executionGateway.isOrderFilled(this.lastUpOrderId);
+                const downFilled = await this.executionGateway.isOrderFilled(this.lastDownOrderId);
+                const status = upFilled && downFilled ? 'BOTH FILLED ✅' : `UP=${upFilled ? 'FILLED' : 'PENDING'} DOWN=${downFilled ? 'FILLED' : 'PENDING'}`;
+                console.log(`📌 Hedge entry status: ${status} | Buy price=$${CONFIG.HEDGE_ENTRY_PRICE.toFixed(2)}`);
+                this.lastFillStatusLogMs = Date.now();
+            }
+
+            // Check for fills on pending orders
+            const upPosition = this.executionGateway.getPaperPosition();
+            if (upPosition && this.upTokenId && upPosition.tokenId === this.upTokenId) {
+                // UP position filled
+                if (this.upPosition && this.upPosition.status === 'PENDING') {
+                    this.upPosition.status = 'FILLED';
+                    this.stats.executedBuyOrders++;
+                }
+            }
+
+            // Check DOWN position
+            const positions = this.executionGateway.getAllPaperPositions();
+            const downPos = positions.find(p => p.tokenId === this.downTokenId);
+            if (downPos && this.downPosition && this.downPosition.status === 'PENDING') {
+                this.downPosition.status = 'FILLED';
+                this.stats.executedBuyOrders++;
+            }
         }
-        if (timeRemainingSeconds === undefined) {
-            return;
-        }
-        if (timeRemainingSeconds > 0) {
-            return;
-        }
-
-        // Settle at expiry using lastSpot vs lastStrike
-        if (this.lastSpotPrice === null || this.lastStrikePrice === null) {
-            console.log('⚠️ Cannot settle hedge: missing last spot/strike');
-            return;
-        }
-
-        console.log('');
-        console.log('🏁 ════════════════════════════════════════');
-        console.log('🏁   MARKET EXPIRED - SETTLING HEDGE');
-        console.log('🏁 ════════════════════════════════════════');
-
-        const upWins = this.lastSpotPrice >= this.lastStrikePrice;
-        const upPayout = upWins ? 1.0 : 0.0;
-        const downPayout = upWins ? 0.0 : 1.0;
-
-        // Sell both positions at payout prices
-        const positions = this.executionGateway.getAllPaperPositions();
-
-        const upTokenId = this.upTokenId;
-        const downTokenId = this.downTokenId;
-
-        if (!upTokenId || !downTokenId) {
-            console.log('⚠️ Cannot settle hedge: missing token IDs');
-            return;
-        }
-
-        const upPosition = positions.find(p => p.tokenId === upTokenId);
-        const downPosition = positions.find(p => p.tokenId === downTokenId);
-
-        if (!upPosition || !downPosition) {
-            console.log('⚠️ Cannot settle hedge: missing one side position (did both buys execute?)');
-            return;
-        }
-
-        const shares = this.sharesPerSide ?? Math.min(upPosition.shares, downPosition.shares);
-
-        await this.executionGateway.executeFAK(upTokenId, 'SELL', upPayout, shares);
-        await this.executionGateway.executeFAK(downTokenId, 'SELL', downPayout, shares);
-
-        const cashAfter = this.executionGateway.getPaperCash();
-
-        // Record settlement "sell" trades
-        const upSell: TradeRecord = {
-            id: `trade_${this.orderCounter++}`,
-            timestamp: Date.now(),
-            marketSlug: this.currentMarketSlug || 'unknown',
-            side: 'SELL',
-            tokenId: upTokenId,
-            tokenType: 'UP',
-            price: upPayout,
-            size: shares,
-            orderId: `SETTLE_UP_${Date.now()}`,
-            status: 'FILLED',
-            exitType: 'HOLD_TO_MATURITY',
-        };
-        const downSell: TradeRecord = {
-            id: `trade_${this.orderCounter++}`,
-            timestamp: Date.now(),
-            marketSlug: this.currentMarketSlug || 'unknown',
-            side: 'SELL',
-            tokenId: downTokenId,
-            tokenType: 'DOWN',
-            price: downPayout,
-            size: shares,
-            orderId: `SETTLE_DOWN_${Date.now()}`,
-            status: 'FILLED',
-            exitType: 'HOLD_TO_MATURITY',
-        };
-        this.tradeRecords.set(upSell.id, upSell);
-        this.tradeRecords.set(downSell.id, downSell);
-
-        // Update session P&L based on realized net (proceeds - invested)
-        const stats = this.getStats();
-        this.sessionState.sessionPnL = stats.realizedPNL;
-        this.sessionState.tradesThisSession += 1;
-
-        console.log(`   Spot: $${this.lastSpotPrice.toFixed(2)} | Strike: $${this.lastStrikePrice.toFixed(2)} | Winner: ${upWins ? 'UP' : 'DOWN'}`);
-        console.log(`   ✅ Settled: UP=${upPayout.toFixed(2)}, DOWN=${downPayout.toFixed(2)} for ${shares.toFixed(4)} shares`);
-        console.log(`   💰 Paper cash after settlement: $${cashAfter.toFixed(2)}`);
-
-        this.hasSettledThisMarket = true;
     }
 
+    /**
+     * Settle positions at market expiry
+     * One token becomes $1.00, the other becomes $0.00
+     */
+    private async settlePositions(): Promise<void> {
+        if (!this.upPosition || !this.downPosition || !this.upTokenId || !this.downTokenId) {
+            return;
+        }
+
+        // Get current positions from execution gateway
+        const positions = this.executionGateway.getAllPaperPositions();
+        const upPos = positions.find(p => p.tokenId === this.upTokenId);
+        const downPos = positions.find(p => p.tokenId === this.downTokenId);
+
+        if (!upPos || !downPos) {
+            console.log('⚠️ Cannot settle - positions not found');
+            return;
+        }
+
+        // Get the minimum shares (in case of partial fills)
+        const shares = Math.min(upPos.shares, downPos.shares);
+
+        if (shares <= 0) {
+            console.log('⚠️ Cannot settle - no shares to settle');
+            return;
+        }
+
+        // We don't need BTC spot/strike to realize the hedge arbitrage payout in paper mode.
+        // For a paired hedge position, total payout is always $1.00 per share-pair.
+        // We can arbitrarily mark UP as the winner for settlement accounting.
+        const upSellPrice = 1.00;
+        const downSellPrice = 0.00;
+
+        console.log('');
+        console.log('🔄 ════════════════════════════════════════════');
+        console.log('🔄   SETTLING HEDGE ARBITRAGE POSITIONS');
+        console.log('🔄 ════════════════════════════════════════════');
+        console.log(`📊 Settlement: UP=$${upSellPrice.toFixed(2)} DOWN=$${downSellPrice.toFixed(2)} (paper)`);        
+        console.log(`📊 UP shares: ${upPos.shares.toFixed(4)}`);
+        console.log(`📊 DOWN shares: ${downPos.shares.toFixed(4)}`);
+        console.log(`📊 Settling: ${shares.toFixed(4)} shares`);
+        console.log('🔄 ════════════════════════════════════════════');
+        console.log('');
+
+        // Sell both tokens at settlement prices
+        console.log(`💰 Selling UP: ${shares.toFixed(4)} shares @ $${upSellPrice.toFixed(2)}`);
+        await this.executionGateway.executeFAK(
+            this.upTokenId,
+            'SELL',
+            shares,
+            upSellPrice
+        );
+
+        console.log(`💰 Selling DOWN: ${shares.toFixed(4)} shares @ $${downSellPrice.toFixed(2)}`);
+        await this.executionGateway.executeFAK(
+            this.downTokenId,
+            'SELL',
+            shares,
+            downSellPrice
+        );
+
+        // Calculate profit
+        const totalInvested = (upPos.entryPrice + downPos.entryPrice) * shares;
+        const totalProceeds = (upSellPrice + downSellPrice) * shares;
+        const profit = totalProceeds - totalInvested;
+
+        console.log('');
+        console.log('✅ Settlement complete');
+        console.log(`   Invested: $${totalInvested.toFixed(2)}`);
+        console.log(`   Proceeds: $${totalProceeds.toFixed(2)}`);
+        console.log(`   Profit: $${profit.toFixed(2)}`);
+        console.log('');
+
+        // Update stats
+        this.stats.totalProceeds += totalProceeds;
+        this.stats.realizedPNL += profit;
+        this.sessionState.sessionPnL += profit;
+
+        // Clear positions
+        this.upPosition = null;
+        this.downPosition = null;
+    }
+
+    /**
+     * Get session state (required by main.ts)
+     */
+    getSessionState(): SessionState {
+        return this.sessionState;
+    }
+
+    /**
+     * Get circuit breaker state (required by main.ts)
+     */
+    getCircuitBreakerState(): CircuitBreakerState {
+        return this.circuitBreakerState;
+    }
+
+    /**
+     * Check if in kill zone (not used in hedge arbitrage)
+     */
+    isInKillZone(upAsk: number, upBid: number, downAsk: number, downBid: number): boolean {
+        return false; // No kill zone for hedge arbitrage
+    }
+
+    /**
+     * Get trade records (required by main.ts)
+     */
     getTradeRecords(): TradeRecord[] {
         return Array.from(this.tradeRecords.values());
     }
 
-    getStats(_currentPrices?: { upBid: number; downBid: number }): StrategyStats {
-        const records = Array.from(this.tradeRecords.values());
-        const buys = records.filter(r => r.side === 'BUY' && r.status === 'FILLED');
-        const sells = records.filter(r => r.side === 'SELL' && r.status === 'FILLED');
-
-        const totalInvested = buys.reduce((s, r) => s + r.price * r.size, 0);
-        const totalProceeds = sells.reduce((s, r) => s + r.price * r.size, 0);
-        const realizedPNL = totalProceeds - totalInvested;
-
-        return {
-            totalBuyOrders: records.filter(r => r.side === 'BUY').length,
-            totalSellOrders: records.filter(r => r.side === 'SELL').length,
-            executedBuyOrders: buys.length,
-            executedSellOrders: sells.length,
-            stopLossExits: 0,
-            limitSellFills: 0,
-            cancelledSells: records.filter(r => r.side === 'SELL' && r.status === 'CANCELLED').length,
-            nakedPositions: Math.max(0, buys.length - sells.length),
-            totalTrades: records.length,
-            totalInvested,
-            totalProceeds,
-            netPNL: realizedPNL,
-            realizedPNL,
-            unrealizedPNL: 0,
-        };
+    /**
+     * Get strategy stats (required by main.ts)
+     */
+    getStats(): StrategyStats {
+        return this.stats;
     }
 
-    async resetForNewMarket(): Promise<void> {
-        this.tradeRecords.clear();
-        this.orderCounter = 0;
-        this.currentMarketSlug = null;
-        this.hasOpenedThisMarket = false;
-        this.hasSettledThisMarket = false;
+    /**
+     * Reset for new market (required by main.ts)
+     */
+    resetForNewMarket(): void {
+        this.hasEnteredThisMarket = false;
         this.upTokenId = null;
         this.downTokenId = null;
-        this.sharesPerSide = null;
-        this.lastSpotPrice = null;
-        this.lastStrikePrice = null;
-
-        this.sessionState = {
-            sessionPnL: 0,
-            sessionStartTime: Date.now(),
-            isSessionLocked: false,
-            lockReason: null,
-            tradesThisSession: 0,
-        };
-
-        await this.executionGateway.clearAllState();
+        this.currentMarketSlug = null;
+        this.upPosition = null;
+        this.downPosition = null;
     }
 }
-

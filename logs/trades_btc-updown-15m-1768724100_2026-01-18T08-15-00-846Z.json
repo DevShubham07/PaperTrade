@@ -1,0 +1,67 @@
+{
+  "session": {
+    "startTime": "2026-01-18T08:15:00.846Z",
+    "endTime": "2026-01-18T08:15:00.915Z",
+    "duration": 0,
+    "marketSlug": "btc-updown-15m-1768723200"
+  },
+  "wallet": {
+    "startingCapital": 12,
+    "endingCapital": 12,
+    "netChange": 0,
+    "netChangePercent": 0,
+    "profitable": true
+  },
+  "statistics": {
+    "totalBuyOrders": 2,
+    "executedBuyOrders": 0,
+    "exits": {
+      "limitSells": 0,
+      "stopLosses": 0,
+      "cancelled": 0,
+      "total": 0
+    },
+    "nakedPositions": 0,
+    "totalTrades": 0
+  },
+  "financial": {
+    "totalInvested": 0,
+    "totalProceeds": 2.04,
+    "realizedPNL": 2,
+    "unrealizedPNL": 0,
+    "netPNL": 0,
+    "roi": 0
+  },
+  "trades": [
+    {
+      "id": "hedge_up_1768724091047",
+      "timestamp": "2026-01-18T08:14:51.047Z",
+      "marketSlug": "btc-updown-15m-1768723200",
+      "side": "BUY",
+      "tokenId": "67389415649257869550687685842772964728858221591555202661989277961087264603892",
+      "tokenType": "UP",
+      "price": 0.49,
+      "size": 2.0408163265306123,
+      "amount": 1,
+      "orderId": "PAPER_0",
+      "status": "PENDING",
+      "exitType": null
+    },
+    {
+      "id": "hedge_down_1768724091047",
+      "timestamp": "2026-01-18T08:14:51.047Z",
+      "marketSlug": "btc-updown-15m-1768723200",
+      "side": "BUY",
+      "tokenId": "18605108452734799695913076258901919732864840645701330327155155646944376315236",
+      "tokenType": "DOWN",
+      "price": 0.49,
+      "size": 2.0408163265306123,
+      "amount": 1,
+      "orderId": "PAPER_1",
+      "status": "PENDING",
+      "exitType": null
+    }
+  ],
+  "completedTrades": [],
+  "nakedPositions": []
+}

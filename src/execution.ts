@@ -47,7 +47,7 @@ export class ExecutionGateway {
     private clobClient: Awaited<ReturnType<typeof createClobClient>> | null = null;
 
     // Paper Trading State
-    private paperCash: number = CONFIG.BANKROLL; // initial paper bankroll (default $20)
+    private paperCash: number = CONFIG.BANKROLL; // Initial capital from config
     private paperPositions: Map<string, Position> = new Map(); // tokenId -> Position
     private paperOrders: Map<string, Order> = new Map();
     private filledPaperOrders: Set<string> = new Set(); // Track filled order IDs
@@ -270,17 +270,21 @@ export class ExecutionGateway {
 
             let filled = false;
 
-            if (order.side === 'BUY' && currentBestAsk <= order.price) {
+            // Guard: if order book side is empty, bestAsk/bid may be reported as 0.
+            // Never fill on 0 because that would create fake fills.
+            if (order.side === 'BUY' && currentBestAsk > 0 && currentBestAsk <= order.price) {
                 // Our buy limit was hit by the market coming down
                 filled = true;
-                const cost = order.price * order.size;
+                // Fill at the best ask (realistic), but never worse than our limit price
+                const fillPrice = Math.min(currentBestAsk, order.price);
+                const cost = fillPrice * order.size;
                 this.paperCash -= cost;
                 
                 // Update or create position
                 const existing = this.paperPositions.get(tokenId);
                 if (existing) {
                     const totalShares = existing.shares + order.size;
-                    const avgPrice = ((existing.entryPrice * existing.shares) + (order.price * order.size)) / totalShares;
+                    const avgPrice = ((existing.entryPrice * existing.shares) + (fillPrice * order.size)) / totalShares;
                     const updated = {
                         tokenId: order.tokenId,
                         shares: totalShares,
@@ -292,24 +296,26 @@ export class ExecutionGateway {
                     const newPos = {
                         tokenId: order.tokenId,
                         shares: order.size,
-                        entryPrice: order.price,
+                        entryPrice: fillPrice,
                         entryTime: Date.now()
                     };
                     this.paperPositions.set(tokenId, newPos);
                 }
                 
-                console.log(`[PAPER] 🔔 BUY ORDER FILLED @ ${order.price.toFixed(4)}. Cash: $${this.paperCash.toFixed(2)}`);
-            } else if (order.side === 'SELL' && currentBestBid >= order.price) {
+                console.log(`[PAPER] 🔔 BUY ORDER FILLED @ ${fillPrice.toFixed(4)} (limit $${order.price.toFixed(4)}). Cash: $${this.paperCash.toFixed(2)}`);
+            } else if (order.side === 'SELL' && currentBestBid > 0 && currentBestBid >= order.price) {
                 // Our sell limit was hit by the market coming up
                 filled = true;
-                const proceeds = order.price * order.size;
+                // Fill at the best bid (realistic), but never better than our limit price
+                const fillPrice = Math.max(currentBestBid, order.price);
+                const proceeds = fillPrice * order.size;
                 const cashBefore = this.paperCash;
                 this.paperCash += proceeds;
                 
                 const position = this.paperPositions.get(tokenId);
                 if (position) {
-                    const pnl = (order.price - position.entryPrice) * order.size;
-                    console.log(`[PAPER] 🔔 SELL ORDER FILLED @ ${order.price.toFixed(4)}. P&L: $${pnl.toFixed(2)}.`);
+                    const pnl = (fillPrice - position.entryPrice) * order.size;
+                    console.log(`[PAPER] 🔔 SELL ORDER FILLED @ ${fillPrice.toFixed(4)} (limit $${order.price.toFixed(4)}). P&L: $${pnl.toFixed(2)}.`);
                     console.log(`[PAPER] 💰 Cash: $${cashBefore.toFixed(2)} → $${this.paperCash.toFixed(2)} (+$${proceeds.toFixed(2)})`);
                     
                     if (position.shares <= order.size) {
@@ -529,7 +535,9 @@ export class ExecutionGateway {
                     console.log(`[LIVE] Found ${openOrders.length} open orders to cancel`);
                     
                     // Extract IDs from OpenOrder objects
-                    const orderIds = openOrders.map(order => order.id).filter(id => !!id);
+                    const orderIds = openOrders
+                        .map((order: { id?: string }) => order.id)
+                        .filter((id: string | undefined): id is string => !!id);
                     
                     for (const orderId of orderIds) {
                         try {

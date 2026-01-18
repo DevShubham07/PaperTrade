@@ -1,0 +1,90 @@
+{
+  "session": {
+    "startTime": "2026-01-18T07:35:10.870Z",
+    "endTime": "2026-01-18T07:45:01.408Z",
+    "duration": 591,
+    "marketSlug": "btc-updown-15m-1768721400"
+  },
+  "wallet": {
+    "startingCapital": 10,
+    "endingCapital": 10.04,
+    "netChange": 0.04,
+    "netChangePercent": 0.41,
+    "profitable": true
+  },
+  "statistics": {
+    "totalBuyOrders": 2,
+    "executedBuyOrders": 2,
+    "exits": {
+      "limitSells": 0,
+      "stopLosses": 0,
+      "cancelled": 0,
+      "total": 0
+    },
+    "nakedPositions": 0,
+    "totalTrades": 0
+  },
+  "financial": {
+    "totalInvested": 0,
+    "totalProceeds": 2.04,
+    "realizedPNL": 0.04,
+    "unrealizedPNL": 0,
+    "netPNL": 0,
+    "roi": 0
+  },
+  "trades": [
+    {
+      "id": "hedge_up_1768721711793",
+      "timestamp": "2026-01-18T07:35:11.793Z",
+      "marketSlug": "btc-updown-15m-1768721400",
+      "side": "BUY",
+      "tokenId": "44449080751947070007904533769333210541684389566912663886533073469393941277713",
+      "tokenType": "UP",
+      "price": 0.49,
+      "size": 2.0408163265306123,
+      "amount": 1,
+      "orderId": "PAPER_FOK_0",
+      "status": "FILLED",
+      "exitType": null
+    },
+    {
+      "id": "hedge_down_1768721711793",
+      "timestamp": "2026-01-18T07:35:11.793Z",
+      "marketSlug": "btc-updown-15m-1768721400",
+      "side": "BUY",
+      "tokenId": "47503401984180046346581252898651008900042276427364937927131480676983839210691",
+      "tokenType": "DOWN",
+      "price": 0.49,
+      "size": 2.0408163265306123,
+      "amount": 1,
+      "orderId": "PAPER_FOK_1",
+      "status": "FILLED",
+      "exitType": null
+    }
+  ],
+  "completedTrades": [],
+  "nakedPositions": [
+    {
+      "buyOrder": {
+        "id": "hedge_up_1768721711793",
+        "price": 0.49,
+        "size": 2.0408163265306123,
+        "amount": 1,
+        "timestamp": "2026-01-18T07:35:11.793Z"
+      },
+      "invested": 1,
+      "status": "UNREALIZED"
+    },
+    {
+      "buyOrder": {
+        "id": "hedge_down_1768721711793",
+        "price": 0.49,
+        "size": 2.0408163265306123,
+        "amount": 1,
+        "timestamp": "2026-01-18T07:35:11.793Z"
+      },
+      "invested": 1,
+      "status": "UNREALIZED"
+    }
+  ]
+}

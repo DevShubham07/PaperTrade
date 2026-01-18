@@ -843,7 +843,7 @@ export class ExpirationConvergenceStrategy {
      * Senior Quant v2.0: Trailing stop (breakeven), session P&L tracking
      * @param timeRemainingSeconds - Time remaining in the market (for hold-to-maturity logic)
      */
-    async updateOrderStatus(timeRemainingSeconds?: number): Promise<void> {
+    async updateOrderStatus(timeRemainingSeconds?: number, spotPrice?: number): Promise<void> {
         // Get all paper orders from execution gateway
         const paperOrders = this.executionGateway.getPaperOrders();
         const allPositions = this.executionGateway.getAllPaperPositions();

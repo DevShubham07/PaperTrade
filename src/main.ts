@@ -13,37 +13,14 @@ import { ExpirationConvergenceStrategy } from './strategies/ExpirationConvergenc
 import { HedgeArbitrage49Strategy } from './strategies/HedgeArbitrage49Strategy';
 import { CONFIG } from './config';
 
-type StrategyLike = {
-    isInKillZone: (upAsk: number, upBid: number, downAsk: number, downBid: number) => boolean;
-    getSessionState: () => { sessionPnL: number; sessionStartTime: number; isSessionLocked: boolean; lockReason: any; tradesThisSession: number };
-    getCircuitBreakerState: () => { isCoolingDown: boolean; crashLowPrice: number; stabilityCounter: number; lastStopLossTime: number; crashTokenId: string; lastTradeTime: number };
-    shouldEnterTrade: (
-        spotPrice: number,
-        strikePrice: number,
-        timeRemainingSeconds: number,
-        currentPrices?: { upAsk: number; upBid: number; downAsk: number; downBid: number }
-    ) => { shouldTrade: boolean; direction: 'UP' | 'DOWN' | null; fairValue?: number; volatility?: number };
-    executeTrade: (
-        marketInfo: any,
-        spotPrice: number,
-        strikePrice: number,
-        direction: 'UP' | 'DOWN',
-        fairValue?: number
-    ) => Promise<{ buyOrderId: string; sellOrderId: string } | null>;
-    updateOrderStatus: (timeRemainingSeconds?: number) => Promise<void>;
-    getStats: (currentPrices?: { upBid: number; downBid: number }) => any;
-    getTradeRecords: () => any[];
-    resetForNewMarket: () => Promise<void>;
-};
-
 class TradingBot {
-    private spotPriceService: SpotPriceService;
+    private spotPriceService: SpotPriceService | null = null;
     private marketInfoService: MarketInfoService;
     private orderBookService: OrderBookService;
     private sessionLogger: SessionLogger;
     private tradeLogger: TradeLogger;
     private executionGateway: ExecutionGateway;
-    private strategy: StrategyLike;
+    private strategy: ExpirationConvergenceStrategy | HedgeArbitrage49Strategy;
     private intervalHandle: NodeJS.Timeout | null = null;
     private isRunning: boolean = false;
     private tickCount: number = 0;
@@ -51,21 +28,22 @@ class TradingBot {
     private consecutiveStrikePriceFailures: number = 0;
 
     constructor() {
-        this.spotPriceService = new SpotPriceService();
         this.marketInfoService = new MarketInfoService();
         this.orderBookService = new OrderBookService();
         this.sessionLogger = new SessionLogger('./data');
         this.tradeLogger = new TradeLogger('./logs');
         this.executionGateway = new ExecutionGateway();
-        this.strategy = CONFIG.HEDGE_ARBITRAGE_MODE
-            ? new HedgeArbitrage49Strategy(this.executionGateway, this.orderBookService)
-            : new ExpirationConvergenceStrategy(this.executionGateway, this.orderBookService);
-
-        console.log('');
-        console.log('🤖 ════════════════════════════════════════════');
-        console.log(`🤖   BOT MODE: ${CONFIG.HEDGE_ARBITRAGE_MODE ? '🧷 HEDGE ARB (BUY BOTH @ 0.49)' : 'SENIOR QUANT v2.1 - SIMPLIFIED SCALPER'}`);
-        console.log('🤖 ════════════════════════════════════════════');
-        if (!CONFIG.HEDGE_ARBITRAGE_MODE) {
+        
+        // Conditionally instantiate strategy based on config
+        if (CONFIG.HEDGE_ARBITRAGE_MODE) {
+            this.strategy = new HedgeArbitrage49Strategy(this.executionGateway, this.orderBookService);
+        } else {
+            this.strategy = new ExpirationConvergenceStrategy(this.executionGateway, this.orderBookService);
+            
+            console.log('');
+            console.log('🤖 ════════════════════════════════════════════');
+            console.log('🤖   SENIOR QUANT BOT v2.1 - SIMPLIFIED SCALPER');
+            console.log('🤖 ════════════════════════════════════════════');
             console.log(`🤖   Safe Zone: $${CONFIG.MIN_ENTRY_PRICE.toFixed(2)} - $${CONFIG.MAX_ENTRY_PRICE.toFixed(2)}`);
             console.log('🤖   --- FIXED RISK PARAMS ---');
             console.log(`🤖   Profit: +$${CONFIG.FIXED_PROFIT_TARGET.toFixed(2)} | Stop: -$${CONFIG.FIXED_STOP_LOSS.toFixed(2)}`);
@@ -74,13 +52,9 @@ class TradingBot {
             console.log(`🤖   Lock at: +$${CONFIG.SESSION_PROFIT_TARGET.toFixed(2)} | Stop at: -$${CONFIG.SESSION_LOSS_LIMIT.toFixed(2)}`);
             console.log('🤖   --- REMOVED IN v2.1 ---');
             console.log('🤖   ❌ Fair value / Z-score | ❌ Trend confirmation');
-        } else {
-            console.log(`🤖   Entry: Buy UP + DOWN @ $${CONFIG.HEDGE_ENTRY_PRICE.toFixed(2)} once per market`);
-            console.log(`🤖   Hold: to expiry, then settle for +$0.02 per share pair (if fills at 0.49/0.49)`);
-            console.log(`🤖   Rotate: after expiry (MARKET_ROTATION_THRESHOLD=${CONFIG.MARKET_ROTATION_THRESHOLD}s)`);
+            console.log('🤖 ════════════════════════════════════════════');
+            console.log('');
         }
-        console.log('🤖 ════════════════════════════════════════════');
-        console.log('');
     }
 
     /**
@@ -205,9 +179,58 @@ class TradingBot {
                 }
             }
 
+            // Hedge arbitrage mode:
+            // - No BTC spot/strike calls
+            // - We poll UP/DOWN order books once per tick and ONLY trade if BOTH best asks are exactly $0.49
+            const hedgeTimeRemainingSeconds = this.marketInfoService.getTimeRemaining() * 60;
+            if (CONFIG.HEDGE_ARBITRAGE_MODE) {
+                console.log(`⏰ Time Remaining: ${hedgeTimeRemainingSeconds.toFixed(0)} seconds`);
+                console.log(`💼 Wallet Cash: $${this.executionGateway.getPaperCash().toFixed(2)}`);
+
+                // Poll order books (once per tick). We only enter if both asks match the target price.
+                try {
+                    const prices = await this.orderBookService.getCurrentPrices(
+                        marketInfo.upTokenId,
+                        marketInfo.downTokenId
+                    );
+
+                    const sum = prices.upAsk + prices.downAsk;
+                    // We no longer require asks to be in range simultaneously (they usually sum ~1).
+                    // We *place bids* immediately at market start, and then watch for fills.
+                    // Still, we log market asks/bids for visibility.
+
+                    console.log(
+                        `💰 Hedge entry check: UP ask=$${prices.upAsk.toFixed(4)} DOWN ask=$${prices.downAsk.toFixed(4)} | Sum=$${sum.toFixed(4)} | ` +
+                        `Range=[${CONFIG.HEDGE_ENTRY_MIN_PRICE.toFixed(3)}-${CONFIG.HEDGE_ENTRY_MAX_PRICE.toFixed(3)}] ` +
+                        `SumMax=${CONFIG.HEDGE_MAX_COMBINED_PRICE.toFixed(3)}`
+                    );
+
+                    // Drive fills for any pending hedge bid orders
+                    this.executionGateway.checkPaperFills(marketInfo.upTokenId, prices.upAsk, prices.upBid);
+                    this.executionGateway.checkPaperFills(marketInfo.downTokenId, prices.downAsk, prices.downBid);
+
+                    await this.strategy.updateOrderStatus(hedgeTimeRemainingSeconds, 0);
+
+                    const strategyCheck = this.strategy.shouldEnterTrade(0, 0, hedgeTimeRemainingSeconds, prices);
+                    if (strategyCheck.shouldTrade && strategyCheck.direction) {
+                        await this.strategy.executeTrade(marketInfo, 0, 0, strategyCheck.direction, 0);
+                    }
+
+                    return;
+                } catch (error: any) {
+                    // If orderbook fails temporarily, keep loop going
+                    console.warn(`⚠️ Hedge mode: order book fetch failed: ${error.message || String(error)}`);
+                }
+                return;
+            }
+
+            // Non-hedge mode continues with full price feeds and order book logic.
             // Fetch current BTC spot price (with fallback if not ready)
             let spotPrice: number;
             try {
+                if (!this.spotPriceService) {
+                    this.spotPriceService = new SpotPriceService();
+                }
                 spotPrice = this.spotPriceService.getBTCPrice();
             } catch (error) {
                 console.log('⏳ Waiting for spot price service to initialize...');
@@ -305,7 +328,7 @@ class TradingBot {
 
             // Update order status (check for fills, stop loss, hold to maturity)
             // This credits cash from filled sells and unlocks trading for next trades
-            await this.strategy.updateOrderStatus(timeRemainingSeconds);
+            await this.strategy.updateOrderStatus(timeRemainingSeconds, spotPrice);
 
             // 🛡️ SAFE ZONE CHECK (Senior Quant v1.3): Only trade $0.60-$0.90
             let killZoneActive = false;
@@ -457,7 +480,9 @@ class TradingBot {
         }
 
         // Cleanup
-        this.spotPriceService.disconnect();
+        if (this.spotPriceService) {
+            this.spotPriceService.disconnect();
+        }
 
         // Flush session data to file (async, non-blocking)
         if (this.sessionLogger.isSessionActive()) {

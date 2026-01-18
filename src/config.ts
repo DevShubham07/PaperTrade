@@ -11,12 +11,11 @@ config();
 export interface BotConfig {
     // === 🟢 MASTER SWITCH ===
     PAPER_TRADE: boolean;
-
-    // === 🧷 HEDGE ARB MODE (Paper Trading) ===
-    // When enabled, bot will buy BOTH UP and DOWN at a fixed entry price (default 0.49)
-    // and hold to settlement to realize ~+$0.02 per share pair (if fills at 0.49/0.49).
-    HEDGE_ARBITRAGE_MODE: boolean;
-    HEDGE_ENTRY_PRICE: number;
+    HEDGE_ARBITRAGE_MODE: boolean;        // Enable hedge arbitrage strategy (buy both UP/DOWN at fixed price)
+    HEDGE_ENTRY_PRICE: number;            // Price to buy both tokens at (default 0.49)
+    HEDGE_ENTRY_MIN_PRICE: number;        // Min allowed ask per leg (e.g., 0.48)
+    HEDGE_ENTRY_MAX_PRICE: number;        // Max allowed ask per leg (e.g., 0.499)
+    HEDGE_MAX_COMBINED_PRICE: number;     // Require upAsk + downAsk <= this (must be < 1.0 to guarantee profit)
 
     // === 🔑 AUTHENTICATION (Live Mode Only) ===
     SIGNER_PRIVATE_KEY: string;
@@ -90,14 +89,14 @@ export interface BotConfig {
 
 // Load configuration from environment variables with fallback defaults
 function loadConfig(): BotConfig {
-    const hedgeMode = process.env.HEDGE_ARBITRAGE_MODE === 'true';
     return {
         // Master Switch
         PAPER_TRADE: process.env.PAPER_TRADE === 'true',
-
-        // Hedge Arb Mode
         HEDGE_ARBITRAGE_MODE: process.env.HEDGE_ARBITRAGE_MODE === 'true',
         HEDGE_ENTRY_PRICE: parseFloat(process.env.HEDGE_ENTRY_PRICE || '0.49'),
+        HEDGE_ENTRY_MIN_PRICE: parseFloat(process.env.HEDGE_ENTRY_MIN_PRICE || '0.48'),
+        HEDGE_ENTRY_MAX_PRICE: parseFloat(process.env.HEDGE_ENTRY_MAX_PRICE || '0.499'),
+        HEDGE_MAX_COMBINED_PRICE: parseFloat(process.env.HEDGE_MAX_COMBINED_PRICE || '0.999'),
 
         // Authentication
         SIGNER_PRIVATE_KEY: process.env.SIGNER_PRIVATE_KEY || '0x0000000000000000000000000000000000000000000000000000000000000000',
@@ -109,8 +108,7 @@ function loadConfig(): BotConfig {
 
         // Market Discovery
         AUTO_DISCOVER_MARKETS: process.env.AUTO_DISCOVER_MARKETS !== 'false', // Default to true
-        // Hedge mode should not rotate early; default to rotating only AFTER expiry (0 seconds)
-        MARKET_ROTATION_THRESHOLD: parseInt(process.env.MARKET_ROTATION_THRESHOLD || (hedgeMode ? '0' : '30')),
+        MARKET_ROTATION_THRESHOLD: parseInt(process.env.MARKET_ROTATION_THRESHOLD || '30'),
         MANUAL_STRIKE_PRICE: process.env.MANUAL_STRIKE_PRICE ? parseFloat(process.env.MANUAL_STRIKE_PRICE) : undefined,
 
         // Strategy Parameters (will be populated by SlugOracle)
@@ -184,6 +182,28 @@ function validateConfig(config: BotConfig): void {
         }
     }
 
+    // Validate hedge arbitrage mode
+    if (config.HEDGE_ARBITRAGE_MODE) {
+        if (!config.PAPER_TRADE) {
+            errors.push('HEDGE_ARBITRAGE_MODE can only be used in PAPER_TRADE mode');
+        }
+        if (config.HEDGE_ENTRY_PRICE <= 0 || config.HEDGE_ENTRY_PRICE >= 1) {
+            errors.push('HEDGE_ENTRY_PRICE must be between 0 and 1');
+        }
+        if (config.HEDGE_ENTRY_MIN_PRICE <= 0 || config.HEDGE_ENTRY_MIN_PRICE >= 1) {
+            errors.push('HEDGE_ENTRY_MIN_PRICE must be between 0 and 1');
+        }
+        if (config.HEDGE_ENTRY_MAX_PRICE <= 0 || config.HEDGE_ENTRY_MAX_PRICE >= 1) {
+            errors.push('HEDGE_ENTRY_MAX_PRICE must be between 0 and 1');
+        }
+        if (config.HEDGE_ENTRY_MIN_PRICE > config.HEDGE_ENTRY_MAX_PRICE) {
+            errors.push('HEDGE_ENTRY_MIN_PRICE must be <= HEDGE_ENTRY_MAX_PRICE');
+        }
+        if (config.HEDGE_MAX_COMBINED_PRICE <= 0 || config.HEDGE_MAX_COMBINED_PRICE >= 1) {
+            errors.push('HEDGE_MAX_COMBINED_PRICE must be between 0 and 1 (and < 1.0)');
+        }
+    }
+
     // Validate market parameters (only if not auto-discovering)
     if (!config.AUTO_DISCOVER_MARKETS) {
         if (!config.TOKEN_ID_UP || config.TOKEN_ID_UP === '') {
@@ -210,18 +230,8 @@ function validateConfig(config: BotConfig): void {
     if (config.STOP_LOSS_THRESHOLD < 0 || config.STOP_LOSS_THRESHOLD > 1) {
         errors.push('STOP_LOSS_THRESHOLD must be between 0 and 1');
     }
-    // Hedge mode needs to allow expiry (0) so we can hold to settlement.
-    const minRotation = config.HEDGE_ARBITRAGE_MODE ? 0 : 10;
-    if (config.MARKET_ROTATION_THRESHOLD < minRotation || config.MARKET_ROTATION_THRESHOLD > 300) {
-        errors.push(`MARKET_ROTATION_THRESHOLD must be between ${minRotation} and 300 seconds`);
-    }
-    if (config.HEDGE_ARBITRAGE_MODE) {
-        if (!config.PAPER_TRADE) {
-            errors.push('HEDGE_ARBITRAGE_MODE is currently supported only in PAPER_TRADE mode');
-        }
-        if (!(config.HEDGE_ENTRY_PRICE > 0 && config.HEDGE_ENTRY_PRICE < 1)) {
-            errors.push('HEDGE_ENTRY_PRICE must be between 0 and 1');
-        }
+    if (config.MARKET_ROTATION_THRESHOLD < 10 || config.MARKET_ROTATION_THRESHOLD > 300) {
+        errors.push('MARKET_ROTATION_THRESHOLD must be between 10 and 300 seconds');
     }
 
     if (errors.length > 0) {
@@ -246,7 +256,6 @@ try {
     console.log('✅ Configuration loaded successfully');
     console.log(`📊 Mode: ${CONFIG.PAPER_TRADE ? 'PAPER TRADING' : '⚠️ LIVE TRADING'}`);
     console.log(`🔄 Market Discovery: ${CONFIG.AUTO_DISCOVER_MARKETS ? 'AUTO' : 'MANUAL'}`);
-    console.log(`🧷 Hedge Arb Mode: ${CONFIG.HEDGE_ARBITRAGE_MODE ? `ON (@ $${CONFIG.HEDGE_ENTRY_PRICE.toFixed(2)})` : 'OFF'}`);
     if (!CONFIG.AUTO_DISCOVER_MARKETS) {
         console.log(`🎯 Strike Price: $${CONFIG.STRIKE_PRICE.toFixed(2)}`);
     }
